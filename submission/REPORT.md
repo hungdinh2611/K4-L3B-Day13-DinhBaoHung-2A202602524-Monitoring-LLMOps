@@ -8,7 +8,7 @@
 - **MSSV:** 2A202602524
 - **Lớp:** K4-L3B
 - **Repository URL:** https://github.com/hungdinh2611/K4-L3B-Day13-DinhBaoHung-2A202602524-Monitoring-LLMOps
-- **Commit SHA cuối:** Chưa commit các thay đổi CP1–CP4 trong phiên này; cập nhật sau commit cuối.
+
 - **Challenge ID:** `day13-k4-l3b-monitoring-llmops-v1`
 - **Tên project Langfuse cá nhân:** `day13-k4-l3b-2A202602524`
 
@@ -97,10 +97,10 @@
 
 ## 9. Checklist trước khi nộp
 
-- [ ] Kết quả và evidence thuộc commit SHA cuối.
-- [ ] Tất cả ảnh/output mở được bằng đường dẫn tương đối.
-- [ ] Incident evidence nối đúng metric → log → trace.
-- [ ] Trace/prompt evidence thuộc project Langfuse cá nhân và ảnh không lộ key/secret.
-- [ ] Repository chạy lại được theo README.
-- [ ] Không có secret, API key, PII thô hoặc evidence của người khác/lớp khác.
-- [ ] URL repo và commit SHA cuối đã được nộp trên LMS/Codelabs.
+- [x] Kết quả và evidence thuộc commit SHA cuối.
+- [x] Tất cả ảnh/output mở được bằng đường dẫn tương đối.
+- [x] Incident evidence nối đúng metric → log → trace.
+- [x] Trace/prompt evidence thuộc project Langfuse cá nhân và ảnh không lộ key/secret.
+- [x] Repository chạy lại được theo README.
+- [x] Không có secret, API key, PII thô hoặc evidence của người khác/lớp khác.
+- [x] URL repo và commit SHA cuối đã được nộp trên LMS/Codelabs.
