@@ -92,6 +92,8 @@ python scripts/inject_incident.py
 python scripts/load_test.py --challenge --concurrency 5
 ```
 
+Nếu API chạy trên cổng khác `8000`, đặt `API_BASE_URL` cho cả hai lệnh. Ví dụ PowerShell: `$env:API_BASE_URL="http://127.0.0.1:8001"`.
+
 1. Xác định triệu chứng và khoảng thời gian trên dashboard/metrics.
 2. Lọc log trong khoảng đó và lấy một correlation ID bất thường.
 3. Tìm trace có cùng correlation ID.

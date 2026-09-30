@@ -1,0 +1,219 @@
+Bài toán và mục tiêu
+Về bài lab này
+Lab cá nhân K4-L3B — instrument AI API, dựng dashboard và điều tra incident theo Metrics → Logs → Traces
+Codelab dành riêng cho lớp K4-L3B. Nếu bạn thuộc K4-L3A, hãy chuyển sang tài liệu của lớp mình nhé. Starter repository: https://github.com/VinUni-AI20k/K4-L3B-Day13-Monitoring-LLMOps
+Một API trả mã HTTP 200 chưa chắc đã hoạt động tốt: nó có thể phản hồi chậm, tốn nhiều token, gọi tool thất bại hoặc ngầm giảm chất lượng câu trả lời. Trong bài lab cá nhân từ 9:00 đến 13:00 (240 phút), bạn sẽ thêm telemetry để tự phát hiện và giải thích những vấn đề này trước khi người dùng phàn nàn.
+
+Khi có sự cố, luôn đi theo chuỗi bằng chứng:
+
+Metrics -> Logs -> Traces -> Root cause
+Chép
+1. Metrics: hệ thống có triệu chứng gì, xấu từ lúc nào.
+2. Logs: chọn ra một request cụ thể bị ảnh hưởng bằng correlation_id.
+3. Traces: request đó chậm hoặc lỗi ở bước nào (retrieval hay LLM generation).
+4. Root cause: kết luận dựa trên bằng chứng của cả ba lớp, không phải đoán.
+Nếu gặp thuật ngữ lạ (correlation_id, P95, TTFT, retrieval success, error budget…), hãy xem bảng "Đọc nhanh để hiểu bài lab" trong README.md của repo.
+Sau lab, bạn có thể:
+
+ghi structured log dạng JSON, truyền correlation ID và che PII trước khi ghi log;
+đo latency P50/P95/P99, TTFT, traffic, error, token, cost, retrieval success và quality proxy;
+tạo ít nhất 10 traces trên Langfuse, có span tree đọc được và metadata không chứa PII;
+liên kết trace với prompt name/label/version và chứng minh được một lần rollback;
+dựng dashboard 6 panel, định nghĩa một SLO cùng error budget và ba alert có runbook;
+viết incident note có chuỗi bằng chứng metric → log → trace.
+Hình thức: cá nhân. Mỗi học viên làm trên fork riêng và nộp URL repo cùng commit SHA cuối.
+
+CP1 — Structured logging và bảo vệ PII
+Mục tiêu: mỗi request có một mã theo dõi duy nhất đi cùng nó từ lúc nhận vào, ghi log, tạo trace đến lúc trả response; log phải an toàn (không có PII thô).
+
+File	Việc cần làm
+app/middleware.py	Xoá context cũ (clear_contextvars()); nhận header x-request-id hoặc sinh ID dạng req- + 8 ký tự hex; bind ID; trả x-request-id và x-response-time-ms trong response header
+app/main.py	Bind user_id_hash, session_id, feature, model, env trước dòng log request_received
+app/logging_config.py	Bật PII scrubber (scrub_event) trước bước ghi file/render JSON
+app/pii.py, tests/test_pii.py	Pattern email, điện thoại VN, CCCD, thẻ đã có sẵn (README ghi "hoàn thiện pattern"); việc cần làm là viết thêm test cho CCCD và thẻ, có thể bổ sung pattern khác
+Kiểm tra:
+
+1. Chuyển log cũ ra ngoài repo (không chỉ đổi tên trong data/, vì .gitignore chỉ bỏ qua đúng data/logs.jsonl, file đã đổi tên sẽ bị commit):
+macOS/Linux: mv data/logs.jsonl ../logs-cp0-baseline.jsonl
+Windows: Move-Item data\logs.jsonl ..\logs-cp0-baseline.jsonl
+1. Restart API.
+2. python scripts/load_test.py
+3. python scripts/validate_logs.py
+CP1 hoàn thành khi điểm ≥ 80/100, response header có x-request-id đúng format, và log không còn PII thô. Chụp 04, 05 ngay (xem 8.2).
+
+CP2 — Traces, prompt, dashboard và alert
+6.1. Trace trên Langfuse
+Starter mới có root observation lab-agent-run. Bạn cần thêm child observation để trace đọc được như cây sau (giống README):
+
+day13-agent-request
+└── lab-agent-run
+    ├── retrieval: tìm tài liệu/context liên quan      (loại retriever hoặc span)
+    └── generation: gọi LLM để sinh câu trả lời         (loại generation)
+Chép
+Generation cần có:
+
+model;
+usage (token input/output);
+cost;
+liên kết tới prompt version: truyền đối tượng prompt lấy từ Langfuse qua tham số prompt=, không gửi nội dung prompt đã điền câu hỏi.
+Không capture raw input/output (câu hỏi có thể chứa PII). correlation_id phải có trong metadata của trace để nối với log.
+
+Mục tiêu: ≥ 10 trace đủ cây trong project của bạn.
+
+Public test tests/test_agent_prompt_trace.py được viết theo cách tạo child observation bằng decorator @observe(...) trên retrieve và FakeLLM.generate. Nếu bạn dùng cách khác mà test này fail, hãy chuyển sang @observe.
+Trace được gửi lên Langfuse ở chế độ nền: sau request cuối, chờ vài giây rồi mới dừng hoặc restart API, nếu không trace sẽ mất. Đối chiếu số trace trên Langfuse với số request trong log.
+6.2. Quản lý phiên bản prompt
+Ý tưởng (xem thêm README, phần "Hiểu nhanh về prompt versioning"): label là con trỏ tới một version. App lấy prompt theo LANGFUSE_PROMPT_LABEL, nên đổi prompt đang dùng không cần sửa code, chỉ cần dời label.
+
+production -> day13-chat v1   →(promote)→   production -> day13-chat v2   →(rollback)→   production -> day13-chat v1
+Chép
+Làm theo docs/PROMPT_VERSIONING.md:
+
+1. Tạo text prompt (không phải chat) tên day13-chat, giữ đúng 3 biến {{feature}}, {{docs}}, {{message}}. Gắn labels baseline và production cho version 1.
+2. Tạo version 2 với một thay đổi nhỏ (vd thêm dòng "trả lời ngắn gọn"), gắn label candidate.
+3. Đặt LANGFUSE_PROMPT_LABEL=baseline trong .env, restart API, gửi request. Đổi thành candidate, restart, gửi request. Xong thì đặt lại production.
+4. Mở 2 trace, bấm vào dòng lab-agent-run, xem tab Metadata: prompt_name, prompt_label, prompt_version phải đúng. Ghi lại 2 trace ID (một của v1, một của v2).
+5. Promote: dời label production sang v2, restart API, gửi 1 request để kiểm tra.
+6. Rollback: dời production về v1, restart, gửi 1 request để kiểm tra. Chụp trạng thái label sau bước 5 và sau bước 6.
+Những điều hay làm học viên bối rối:
+
+Làm cả promote lẫn rollback (bước 5 và 6).
+Langfuse tự gắn label latest vào version mới nhất; đây là bình thường.
+Mỗi label chỉ nằm trên một version: gắn production cho v2 thì v1 tự mất label đó.
+App cache prompt khoảng 60 giây, nên sau mỗi lần đổi label thì restart API rồi mới kiểm tra.
+Fake LLM luôn trả cùng một câu trả lời, nên v1 và v2 chỉ khác prompt_version và tokens_in. Đây là bình thường.
+Metadata hiện local-v1: prompt_source=local nghĩa là chưa bật Langfuse; local-fallback nghĩa là tải prompt lỗi. Kiểm tra key/region, tên và label, prompt có phải loại Text không, rồi restart API.
+6.3. Dashboard
+Dựng đúng 6 panel từ data/logs.jsonl theo config/dashboard.yaml. Công cụ tuỳ chọn: Streamlit, notebook, Grafana, script vẽ biểu đồ…
+
+Panel	Câu hỏi cần trả lời
+Latency	Request có chậm không? P50/P95/P99 và TTFT đang ở mức nào?
+Traffic	Hệ thống đang nhận bao nhiêu request theo thời gian?
+Errors	Error rate có tăng không, retrieval có đang fail không?
+Cost	Chi phí có tăng bất thường không?
+Tokens	Input/output token có dài bất thường không?
+Quality	Quality proxy có giảm dưới mức chấp nhận được không?
+Mỗi panel cần: tên, đơn vị, time range 60 phút, refresh 30 giây (nếu công cụ hỗ trợ), và đường threshold.
+
+Gợi ý:
+
+Retrieval success = tỉ lệ tool_success == true trên mọi event có field tool_success, gồm cả response_sent lẫn request_failed. Nếu chỉ lấy request_failed (như danh sách events trong YAML) thì kết quả luôn là 0 %.
+Công cụ vẽ không có sẵn trong requirements.txt, hãy cài vào venv riêng. Streamlit cài chung sẽ hạ phiên bản thư viện mà API đang dùng.
+st.line_chart không vẽ được threshold; dùng altair mark_rule, plotly add_hline hoặc matplotlib axhline.
+Trường ts trong log là giờ UTC. Chạy load_test.py rải rác 10–15 phút để biểu đồ theo phút có đủ điểm.
+Đã chạy practice thì trước khi chụp dashboard, chuyển log cũ ra ngoài repo (như CP1) rồi chạy lại load test; nếu không, request lỗi của practice sẽ làm lệch error rate.
+Kiểm tra contract: python scripts/validate_dashboard.py (chỉ kiểm tra cấu trúc YAML; ảnh dashboard có dữ liệu vẫn bắt buộc).
+
+6.4. SLO và alerts
+config/slo.yaml: giải thích hoặc điều chỉnh SLO dựa trên baseline của bạn, và tính error budget ra số request. Ví dụ: SLO 99,5 % với 10.000 request thì tối đa 50 request được phép chậm hoặc lỗi.
+config/alert_rules.yaml: thay hết TODO bằng 3 alert symptom-based, mỗi alert có condition, duration, severity, owner, Slack channel, runbook.
+docs/alerts.md: viết runbook cho từng alert (ba bước kiểm tra Metrics → Logs → Traces, mitigation). Đầu file có alert mẫu để tham khảo. Giữ nguyên heading ## Alert 1/2/3, vì link #alert-1 trong YAML trỏ vào đó.
+
+CP3 — Điều tra challenge
+Starter không chứa file đề. Khi mở CP3, Lab Coach đưa file đề lên starter và gửi một đường link. Ở thư mục gốc repo, tải file về đúng vị trí:
+
+# macOS / Linux / Git Bash
+curl -fsSL -o config/challenge.json "<LINK_LAB_COACH_GỬI>"
+Chép
+# Windows PowerShell (gõ đúng curl.exe)
+curl.exe -fsSL -o config/challenge.json "<LINK_LAB_COACH_GỬI>"
+Chép
+Mở file, xác nhận challenge_id là day13-k4-l3b-monitoring-llmops-v1.
+Không bấm Sync fork để lấy đề; file chỉ cần có trên máy bạn.
+config/challenge.json đã nằm trong .gitignore: không force-add, commit, push hoặc chia sẻ.
+Chuẩn bị (làm theo thứ tự):
+
+1. Chuyển log hiện tại ra ngoài repo (như CP1), để dashboard CP3 chỉ còn dữ liệu mới.
+2. Tắt incident practice nếu còn bật: python scripts/inject_incident.py --scenario <tên> --disable. Mở /health, kiểm tra mọi incidents đều false.
+3. Chạy API không có --reload: uvicorn app.main:app --env-file .env. Với --reload, chỉ cần lưu file là server khởi động lại và incident tự tắt.
+4. Chạy python scripts/load_test.py một lần (chưa bật incident) để có baseline trong cửa sổ CP3.
+Chạy challenge (chỉ khi Lab Coach thông báo mở):
+
+python scripts/inject_incident.py
+python scripts/load_test.py --challenge --concurrency 5
+Chép
+Chưa có file đề thì script in lỗi, dòng cuối là FileNotFoundError: config/challenge.json chưa được Lab Coach release…. Khi đó cứ tiếp tục practice bằng --scenario (xem danh sách bằng python scripts/inject_incident.py --help).
+
+Điều tra theo đúng thứ tự (không đoán root cause, không mở trace ngẫu nhiên):
+
+1. Metrics: panel nào bất thường, giá trị bao nhiêu so với baseline, lúc mấy giờ. Latency lấy từ latency_ms trong log/dashboard. Không dùng thời gian mà load_test.py in ra: với --concurrency 5 các request xếp hàng, nên số phía client lớn hơn nhiều so với thực tế.
+2. Logs: lọc data/logs.jsonl trong khoảng đó, chọn một request bất thường, ghi correlation_id.
+3. Traces: mở trace có cùng correlation_id, so sánh thời gian và trạng thái các span.
+4. Kết luận: root cause, fix action, preventive measure vào submission/REPORT.md, kèm challenge ID, metric, log line/correlation_id, trace ID. Ba bằng chứng phải cùng chỉ về một nguyên nhân.
+Chỉ dùng file Lab Coach gửi cho K4-L3B; không sửa nội dung, không tự tạo, không lấy file của lớp khác (0 điểm phần incident).
+Nếu hoàn thành sớm, Lab Coach có thể gửi thêm link một challenge phụ (challenge_id khác). Tắt incident vừa điều tra (--scenario <tên> --disable), tải file mới đè lên config/challenge.json, chuyển log ra ngoài repo, rồi làm lại các bước trên. Cách ghi vào report theo hướng dẫn của Lab Coach.
+
+
+
+
+CP4 — Báo cáo, evidence và nộp bài
+8.1. Báo cáo
+Điền đủ mọi mục trong submission/REPORT.md (danh sách ở docs/SUBMISSION.md §8): thông tin, evidence index, bảng baseline và kết quả cuối, logging/PII, tracing/prompt (có 2 trace ID), dashboard/SLO/alert, điều tra challenge, quyết định kỹ thuật, blocker, bài học. Ảnh dẫn bằng đường dẫn tương đối, ví dụ ![Trace waterfall](evidence/07-trace-waterfall.png). Không dùng đường dẫn máy như C:\Users\....
+
+8.2. Chụp evidence
+Lưu ảnh .png (test/validator có thể dùng .txt) vào submission/evidence/.
+
+Cách chụp:
+
+Hệ điều hành	Phím tắt chụp một vùng
+Windows	Win + Shift + S
+macOS	Cmd + Shift + 4
+Ubuntu	Shift + PrtSc
+Quy tắc chung:
+
+Ảnh phải thấy lệnh + kết quả (terminal), hoặc tên project + khoảng thời gian (Langfuse).
+Chữ đọc được.
+Không lộ .env, trang API Keys hay secret.
+Để lấy log của một request, gửi request có ID tự đặt (req- + 8 ký tự hex) rồi in log của nó. Hai lệnh này dùng được trên mọi hệ điều hành; thay req-1a2b3c4d bằng ID của bạn:
+
+python -c "import httpx; r = httpx.post('http://127.0.0.1:8000/chat', json={'user_id':'demo','session_id':'demo-01','feature':'qa','message':'Explain traces'}, headers={'x-request-id':'req-1a2b3c4d'}); print(r.status_code, r.headers.get('x-request-id'), r.headers.get('x-response-time-ms'))"
+python -c "import json,sys; [print(json.dumps(json.loads(l), ensure_ascii=False, indent=2)) for l in open('data/logs.jsonl', encoding='utf-8') if sys.argv[1] in l]" req-1a2b3c4d
+Chép
+#	Tên file	Chụp ở đâu / làm gì	Ảnh phải thấy
+01	01-pytest.png	Sau commit code cuối: git log -1 --oneline rồi python -m pytest -q	Mã commit + N passed
+02	02-log-validator.png	Chuyển log cũ ra ngoài repo → restart → load_test.py → validate_logs.py	Khối Grading Scorecard + Estimated Score ≥ 80
+03	03-dashboard-validator.png	python scripts/validate_dashboard.py	HỢP LỆ: 6/6 panel
+04	04-structured-log.png	2 lệnh ở trên với ID tự đặt	2 khối JSON request_received + response_sent, đủ ts, event, correlation_id, user_id_hash, session_id, feature, model, env, latency_ms. Ghi ID vào report
+05	05-pii-redaction.png	Như 04 nhưng message = a@b.vn 0901234567 001099012345 4111 1111 1111 1111 (câu ngắn vì preview bị cắt ở 80 ký tự)	Lệnh có PII và log hiện [REDACTED_EMAIL] [REDACTED_PHONE_VN] [REDACTED_CCCD] [REDACTED_CREDIT_CARD]
+06	06-trace-list.png	Langfuse → Tracing	Tên project, khoảng thời gian, ≥ 10 trace day13-agent-request, cột Input/Output trống
+07	07-trace-waterfall.png	Mở trace của request ở 04 → Timeline (bật Show labels) hoặc Tree	lab-agent-run là cha của retrieval và generation, mỗi dòng có thời gian
+08	08a-…png, 08b-…png	08a: bấm lab-agent-run → Metadata. 08b: bấm generation	08a: correlation_id trùng ảnh 04, prompt_name/label/version, prompt_source=langfuse. 08b: model, token, cost, nhãn Prompt: day13-chat - vN. Input/Output trống
+09	09-prompt-versions.png	Langfuse → Prompts → day13-chat	v1, v2 với nhãn baseline, candidate, production (có thêm latest là bình thường)
+10	10a-…png, 10b-…png	Trang prompt sau khi promote (10a) và sau khi rollback (10b)	Nhãn production nằm ở v2 (10a), rồi quay về v1 (10b)
+11	11-dashboard-overview.png (hoặc 11a/11b/11c)	Dashboard, chụp đủ 6 panel	Tên panel, đơn vị, threshold, time range; latency có TTFT; errors có retrieval success
+12	12-incident-metric.png	Dashboard ngay sau challenge	Đoạn baseline và đoạn bất thường trên cùng trục thời gian
+13	13-incident-log.png	Lọc request bất thường (lệnh bên dưới), rồi in 1 request bằng lệnh ở 04	Dòng log có correlation_id, giờ, giá trị bất thường
+14	14-incident-trace.png	Langfuse, trace có cùng correlation_id với ảnh 13	Waterfall thấy span bất thường + metadata correlation_id
+Lệnh lọc request bất thường cho ảnh 13:
+
+# request chậm
+python -c "import json; rows=[json.loads(l) for l in open('data/logs.jsonl', encoding='utf-8')]; [print(r['ts'], r['correlation_id'], r['session_id'], r['latency_ms'], 'ms') for r in rows if r.get('event')=='response_sent' and r.get('latency_ms',0)>2000]"
+# request lỗi
+python -c "import json; rows=[json.loads(l) for l in open('data/logs.jsonl', encoding='utf-8')]; [print(r['ts'], r['correlation_id'], r.get('session_id'), r.get('error_type'), r.get('tool_success')) for r in rows if r.get('event')=='request_failed']"
+Chép
+8.3. Tự kiểm tra chéo
+Phải khớp	Giữa
+Cùng correlation_id	04 ↔ 08a; 13 ↔ 14 ↔ phần incident trong report
+Cùng trace	07, 08a, 08b là một trace, và trace đó có trong danh sách ở 06
+Cùng thời điểm	Giờ trong log là UTC; Langfuse hiện giờ Việt Nam (+7 tiếng). Vd 04:39Z trong log = 11:39 trên Langfuse
+Cùng version	2 trace ID trong report có prompt_version 1 và 2
+Cùng người	Tên project day13-k4-l3b-<MSSV> trong ảnh khớp MSSV trong report và tên repo
+Cùng đề	challenge_id trong report khớp đề đã tải
+8.4. Kiểm tra cuối và nộp
+python -m pytest -q
+python scripts/validate_logs.py
+python scripts/validate_dashboard.py
+git status --short
+git log -1 --oneline
+Chép
+Không dùng git add .. Chỉ add đúng phần bài làm, vd git add app tests config docs submission (cùng thư mục dashboard nếu có).
+Kiểm tra git status không có .env, config/challenge.json, file log *.jsonl, .venv/.
+Checklist:
+
+submission/REPORT.md đủ mọi mục; ảnh dẫn bằng đường dẫn tương đối và mở được trên GitHub.
+Có evidence 01–14; tests pass, log validator ≥ 80/100, dashboard validator 6/6.
+≥ 10 trace trong project cá nhân; waterfall, metadata, prompt v1/v2, promote và rollback.
+Dashboard đủ 6 panel; SLO/error budget có số cụ thể; 3 alert + runbook.
+Incident đi theo Metrics → Logs → Traces, dùng cùng correlation_id.
+Không có secret, PII thô, config/challenge.json, log, hay bài của người khác/lớp khác.
+Nộp URL fork trên VLearn LMS/Codelabs trước 23:59:59 ngày diễn ra lab (giờ Asia/Ho_Chi_Minh). Nộp trễ 0–2 giờ trừ 10 %, 2–12 giờ trừ 25 %, quá 12 giờ 0 điểm (docs/RULES.md). Thang điểm: 100 + tối đa 10 bonus (docs/RUBRIC.md). Validator chỉ là technical gate, không thay thế dashboard/trace thật hay phần Q&A.

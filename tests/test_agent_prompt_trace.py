@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 from app import agent as agent_module
+from app import mock_llm
 
 
 class ManagedPrompt:
@@ -20,6 +21,7 @@ class RecordingLangfuseClient:
     def __init__(self) -> None:
         self.prompt = ManagedPrompt()
         self.span_updates: list[dict] = []
+        self.generation_updates: list[dict] = []
 
     def get_prompt(self, name: str, **kwargs):
         return self.prompt
@@ -27,12 +29,16 @@ class RecordingLangfuseClient:
     def update_current_span(self, **kwargs) -> None:
         self.span_updates.append(kwargs)
 
+    def update_current_generation(self, **kwargs) -> None:
+        self.generation_updates.append(kwargs)
+
 
 def test_agent_records_prompt_version_with_v4_observation_api(monkeypatch) -> None:
     monkeypatch.setenv("LANGFUSE_PROMPT_NAME", "day13-chat")
     monkeypatch.setenv("LANGFUSE_PROMPT_LABEL", "production")
     client = RecordingLangfuseClient()
     monkeypatch.setattr(agent_module, "get_langfuse_client", lambda: client)
+    monkeypatch.setattr(mock_llm, "get_langfuse_client", lambda: client)
     monkeypatch.setattr(agent_module, "tracing_enabled", lambda: True)
 
     propagated: list[dict] = []
@@ -57,7 +63,6 @@ def test_agent_records_prompt_version_with_v4_observation_api(monkeypatch) -> No
     span_update = client.span_updates[-1]
     assert span_update["metadata"] == {
         "doc_count": 1,
-        "query_preview": "Explain traces",
         "prompt_name": "day13-chat",
         "prompt_label": "production",
         "prompt_version": "3",
@@ -67,3 +72,12 @@ def test_agent_records_prompt_version_with_v4_observation_api(monkeypatch) -> No
     assert span_update["version"] == "3"
     assert propagated[0]["metadata"]["correlation_id"] == "req-12345678"
     assert propagated[-1]["prompt"] is client.prompt
+    generation = next(
+        update
+        for update in getattr(client, "generation_updates", [])
+    )
+    assert generation["model"] == agent.model
+    assert generation["usage_details"]["input"] > 0
+    assert generation["usage_details"]["output"] > 0
+    assert generation["cost_details"]["total"] >= 0
+    assert generation["prompt"] is client.prompt
